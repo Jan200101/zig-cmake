@@ -1,0 +1,3 @@
+[submodule "loggerDB"]
+	path = loggerDB
+	url = https://github.com/Jan200101/loggerDB
