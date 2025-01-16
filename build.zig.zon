@@ -1,6 +1,14 @@
 .{
     .name = "zig-cmake",
     .version = "0.0.0",
-    .dependencies = .{},
-    .paths = .{"."},
+    .dependencies = .{
+        .loggerdb = .{
+            .url = "https://github.com/Jan200101/loggerDB/archive/7df035a3a158e606cd425fdebb01b0f4073cfac1.tar.gz",
+            .hash = "1220b3662373c6eb1be5cde39b84d7e64c559f0603221918237750972ff0bba528f7",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
 }
