@@ -9,7 +9,7 @@ pub fn build(b: *Build) void {
         .path = b.dependency("loggerdb", .{}).path(""),
     });
 
-    cmake.setOption("CMAKE_INSTALL_PREFIX", "/usr");
+    cmake.setOption("CMAKE_INSTALL_PREFIX", .{ .STRING = "/usr" });
     cmake.exposeOptions(.{ .advanced = false });
 
     cmake.configure();
@@ -22,7 +22,23 @@ pub const CmakeIntegration = struct {
     build_dir: Build.LazyPath,
 
     targets: StringHashMap(std.Build.Module),
-    options: StringHashMap([]const u8),
+    options: StringHashMap(OptionType),
+
+    pub const OptionTypeTag = enum {
+        BOOL,
+        FILEPATH,
+        PATH,
+        STRING,
+        INTERNAL,
+    };
+
+    pub const OptionType = union(OptionTypeTag) {
+        BOOL: bool,
+        FILEPATH: []const u8,
+        PATH: []const u8,
+        STRING: []const u8,
+        INTERNAL: []const u8,
+    };
 
     pub const Options = struct {
         name: []const u8,
@@ -39,21 +55,21 @@ pub const CmakeIntegration = struct {
 
         const cmake = b.allocator.create(CmakeIntegration) catch @panic("OOM");
 
-        var cmake_options = StringHashMap([]const u8).init(b.allocator);
-        cmake_options.put("CMAKE_C_COMPILER", b.graph.zig_exe) catch unreachable;
-        cmake_options.put("CMAKE_CXX_COMPILER", b.graph.zig_exe) catch unreachable;
+        var cmake_options = StringHashMap(OptionType).init(b.allocator);
+        cmake_options.put("CMAKE_C_COMPILER", .{ .STRING = b.graph.zig_exe }) catch unreachable;
+        cmake_options.put("CMAKE_CXX_COMPILER", .{ .STRING = b.graph.zig_exe }) catch unreachable;
 
         const c_compiler_args = std.fmt.allocPrint(b.allocator, "cc -target {s}", .{triple}) catch unreachable;
-        cmake_options.put("CMAKE_C_COMPILER_ARG1", c_compiler_args) catch unreachable;
+        cmake_options.put("CMAKE_C_COMPILER_ARG1", .{ .STRING = c_compiler_args }) catch unreachable;
         const cxx_compiler_args = std.fmt.allocPrint(b.allocator, "c++ -target {s}", .{triple}) catch unreachable;
-        cmake_options.put("CMAKE_CXX_COMPILER_ARG1", cxx_compiler_args) catch unreachable;
+        cmake_options.put("CMAKE_CXX_COMPILER_ARG1", .{ .STRING = cxx_compiler_args }) catch unreachable;
 
         const cmake_build_type = switch (optimize) {
             .Debug => "Debug",
             .ReleaseSafe, .ReleaseFast => "Release",
             .ReleaseSmall => "MinSizeRel",
         };
-        cmake_options.put("CMAKE_BUILD_TYPE", cmake_build_type) catch unreachable;
+        cmake_options.put("CMAKE_BUILD_TYPE", .{ .STRING = cmake_build_type }) catch unreachable;
 
         const build_dir_name = std.fmt.allocPrint(b.allocator, "build", .{}) catch unreachable;
 
@@ -69,7 +85,7 @@ pub const CmakeIntegration = struct {
         return cmake;
     }
 
-    pub fn setOption(self: *@This(), k: []const u8, v: []const u8) void {
+    pub fn setOption(self: *@This(), k: []const u8, v: OptionType) void {
         self.options.put(k, v) catch unreachable;
     }
 
@@ -109,12 +125,20 @@ pub const CmakeIntegration = struct {
             const name = output[head + 1 .. tail];
 
             head = std.mem.indexOfPos(u8, output, tail, "=") orelse unreachable;
+            const vartype = std.meta.stringToEnum(OptionTypeTag, output[tail + 1 .. head]) orelse @panic("invalid type");
+
             tail = std.mem.indexOfPos(u8, output, head, "\n") orelse unreachable;
-            const value = output[head + 1 .. tail];
+            const value: OptionType = switch (vartype) {
+                .BOOL => .{ .BOOL = std.ascii.eqlIgnoreCase("ON", output[head + 1 .. tail]) },
+                else => .{ .STRING = output[head + 1 .. tail] },
+            };
 
             const gop = self.options.getOrPut(name) catch unreachable;
             if (!gop.found_existing) {
-                const option = self.b.option([]const u8, name, comment) orelse value;
+                const option: OptionType = switch (vartype) {
+                    .BOOL => .{ .BOOL = self.b.option(bool, name, comment) orelse value.BOOL },
+                    else => .{ .STRING = self.b.option([]const u8, name, comment) orelse value.STRING },
+                };
                 gop.value_ptr.* = option;
             }
         }
@@ -144,7 +168,13 @@ pub const CmakeIntegration = struct {
 
         var it = self.options.iterator();
         while (it.next()) |entry| {
-            const flag = std.fmt.allocPrint(self.b.allocator, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* }) catch @panic("OOM");
+            const value = switch (entry.value_ptr.*) {
+                .BOOL => if (entry.value_ptr.*.BOOL == true) "ON" else "OFF",
+                else => entry.value_ptr.*.STRING,
+            };
+
+            const flag = std.fmt.allocPrint(self.b.allocator, "{s}={s}", .{ entry.key_ptr.*, value }) catch @panic("OOM");
+
             args.append("-D") catch unreachable;
             args.append(flag) catch unreachable;
         }
