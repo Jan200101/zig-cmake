@@ -2,6 +2,8 @@ const std = @import("std");
 const Build = std.Build;
 const StringHashMap = std.StringHashMap;
 const builtin = std.builtin;
+const fs = std.fs;
+const assert = std.debug.assert;
 
 pub fn build(b: *Build) void {
     var cmake = CmakeIntegration.create(b, .{
@@ -109,7 +111,7 @@ pub const CmakeIntegration = struct {
         const temp_build_path = self.source_dir.path(self.b, "temp_build").getPath2(self.b, null);
 
         const output = self.b.run(&.{ "cmake", cmake_flags, "-S", source_path, "-B", temp_build_path });
-        std.fs.cwd().deleteTree(temp_build_path) catch unreachable;
+        fs.cwd().deleteTree(temp_build_path) catch unreachable;
 
         const start = std.mem.indexOf(u8, output, "Cache values") orelse unreachable;
         var head = start;
@@ -144,24 +146,45 @@ pub const CmakeIntegration = struct {
         }
     }
 
+    pub const CmakeTrace = struct {
+        version: ?struct {
+            major: u8,
+            minor: u8,
+        } = null,
+        args: ?[]const []const u8 = null,
+        cmd: ?[]const u8 = null,
+        file: ?[]const u8 = null,
+        frame: ?u32 = null,
+        global_frame: ?u32 = null,
+        line: ?u32 = null,
+        line_end: ?u32 = null,
+        time: ?f32 = null,
+    };
+
     fn configure(self: *@This()) void {
         const source_dir = self.source_dir.getPath2(self.b, null);
         const build_dir = self.build_dir.getPath2(self.b, null);
 
+        fs.cwd().makeDir(build_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => unreachable,
+        };
+
         var args = std.ArrayList([]const u8).init(self.b.allocator);
         args.append("cmake") catch unreachable;
-
-        // Needed to generate a trace file which we can parse to find out where artifacts will be located
-        args.append("--trace") catch unreachable;
-        args.append("--trace-expand") catch unreachable;
-        args.append("--trace-format=json-v1") catch unreachable;
-        const trace_redirect = std.fmt.allocPrint(self.b.allocator, "--trace-redirect={s}", .{self.build_dir.path(self.b, "cmake_trace.txt").getPath2(self.b, null)}) catch @panic("OOM");
-        args.append(trace_redirect) catch unreachable;
 
         args.append("-S") catch unreachable;
         args.append(source_dir) catch unreachable;
         args.append("-B") catch unreachable;
         args.append(build_dir) catch unreachable;
+
+        // Needed to generate a trace file which we can parse to find out where artifacts will be located
+        const trace_path = self.build_dir.path(self.b, "cmake_trace.txt").getPath2(self.b, null);
+        args.append("--trace") catch unreachable;
+        args.append("--trace-expand") catch unreachable;
+        args.append("--trace-format=json-v1") catch unreachable;
+        const trace_redirect = std.fmt.allocPrint(self.b.allocator, "--trace-redirect={s}", .{trace_path}) catch @panic("OOM");
+        args.append(trace_redirect) catch unreachable;
 
         // Disable some warnings
         args.append("-DCMAKE_POLICY_WARNING_CMP0156=OFF") catch unreachable;
@@ -173,7 +196,12 @@ pub const CmakeIntegration = struct {
                 else => entry.value_ptr.*.STRING,
             };
 
-            const flag = std.fmt.allocPrint(self.b.allocator, "{s}={s}", .{ entry.key_ptr.*, value }) catch @panic("OOM");
+            const valtype = switch (entry.value_ptr.*) {
+                .BOOL => "BOOL",
+                else => "STRING",
+            };
+
+            const flag = std.fmt.allocPrint(self.b.allocator, "{s}:{s}={s}", .{ entry.key_ptr.*, valtype, value }) catch @panic("OOM");
 
             args.append("-D") catch unreachable;
             args.append(flag) catch unreachable;
@@ -181,7 +209,37 @@ pub const CmakeIntegration = struct {
 
         std.debug.print("{s}\n", .{build_dir});
         std.debug.print("{s}\n", .{args.items});
-        const output = self.b.run(args.items);
-        _ = output;
+        _ = self.b.run(args.items);
+
+        const file = fs.cwd().openFile(trace_path, .{}) catch unreachable;
+        defer file.close();
+
+        var buf_reader = std.io.bufferedReader(file.reader());
+        const reader = buf_reader.reader();
+
+        var line = std.ArrayList(u8).init(self.b.allocator);
+        defer line.deinit();
+
+        const writer = line.writer();
+        while (reader.streamUntilDelimiter(writer, '\n', null)) {
+            // Clear the line so we can reuse it.
+            defer line.clearRetainingCapacity();
+
+            const parsed = std.json.parseFromSlice(
+                CmakeTrace,
+                self.b.allocator,
+                line.items,
+                .{},
+            ) catch unreachable;
+            defer parsed.deinit();
+            const trace = parsed.value;
+
+            if (trace.cmd) |cmd| {
+                std.debug.print("{s}({s})\n", .{ cmd, trace.args.? });
+            }
+        } else |err| switch (err) {
+            error.EndOfStream => assert(line.items.len == 0),
+            else => unreachable,
+        }
     }
 };
