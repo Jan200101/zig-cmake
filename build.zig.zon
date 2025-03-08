@@ -1,5 +1,5 @@
 .{
-    .name = "zig-cmake",
+    .name = .zig_cmake,
     .version = "0.0.0",
     .dependencies = .{
         .loggerdb = .{
@@ -11,4 +11,5 @@
         "build.zig",
         "build.zig.zon",
     },
+    .fingerprint = 0x1af38ad308218b02
 }
