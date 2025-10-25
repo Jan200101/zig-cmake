@@ -51,6 +51,24 @@ pub const Trace = struct {
     line: ?u32 = null,
     line_end: ?u32 = null,
     time: ?f32 = null,
+
+    pub fn format(self: @This(), writer: *std.Io.Writer) !void {
+        if (self.cmd == null)
+            return;
+
+        try writer.writeAll(self.cmd.?);
+        if (self.args) |args| {
+            try writer.writeAll("(");
+            for (args, 0..) |arg, i| {
+                if (i != 0)
+                    try writer.writeAll(", ");
+                try writer.print("\"{f}\"", .{std.zig.fmtString(arg)});
+            }
+            try writer.writeAll(")");
+        } else {
+            try writer.writeAll("()");
+        }
+    }
 };
 
 pub const Commands = enum {
@@ -275,7 +293,7 @@ pub fn configure(self: *@This()) !void {
 
         const line_buffer = writer.buffer[0..writer.end];
 
-        std.debug.print("{s}\n", .{line_buffer});
+        //std.debug.print("{s}\n", .{line_buffer});
 
         const parsed = try std.json.parseFromSlice(
             Trace,
@@ -286,6 +304,11 @@ pub fn configure(self: *@This()) !void {
         defer parsed.deinit();
         const trace = parsed.value;
 
+        if (trace.version) |version| {
+            std.debug.print("trace version: {}.{}\n", .{ version.major, version.minor });
+            continue;
+        }
+
         if (trace.cmd) |cmd_string| {
             for (cmd_ignore_list.items) |ignored_cmd| {
                 const lowercase_cmd_string = try std.ascii.allocLowerString(self.b.allocator, cmd_string);
@@ -293,12 +316,12 @@ pub fn configure(self: *@This()) !void {
             }
 
             const cmd = std.meta.stringToEnum(Commands, cmd_string) orelse {
-                std.debug.print("unhandled command: {s}({any})\n", .{ cmd_string, trace.args.? });
+                std.debug.print("unhandled command: {f}\n", .{trace});
                 @panic("unhandled command");
             };
+
             switch (cmd) {
                 // No need to handle this ourselves, just ignore them when they are invoked
-                .add_library,
                 .add_subdirectory,
                 .block,
                 .check_c_source_compiles,
@@ -342,8 +365,17 @@ pub fn configure(self: *@This()) !void {
                     const method_name = std.ascii.allocLowerString(self.b.allocator, trace.args.?[0]) catch unreachable;
                     cmd_ignore_list.append(method_name) catch unreachable;
                 },
+
+                .add_library => {
+                    std.debug.print("{f}\n", .{trace});
+                },
             }
+
+            continue;
         }
+
+        std.debug.print("unhandled trace: {s}\n", .{line_buffer});
+        unreachable;
     } else |err| switch (err) {
         error.EndOfStream => assert(writer.end == 0),
         error.ReadFailed => unreachable,
