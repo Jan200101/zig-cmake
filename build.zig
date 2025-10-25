@@ -12,5 +12,5 @@ pub fn build(b: *Build) void {
     project.setOption("CMAKE_INSTALL_PREFIX", .{ .STRING = "/usr" });
     project.exposeOptions(.{ .advanced = false });
 
-    project.configure();
+    project.configure() catch unreachable;
 }

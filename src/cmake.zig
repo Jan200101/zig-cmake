@@ -92,6 +92,7 @@ pub const Commands = enum {
     target_sources,
     unset,
     lang,
+    execute_process,
 
     // function:
     //_cmake_record_install_prefix,
@@ -202,7 +203,7 @@ pub fn exposeOptions(self: *@This(), flags: exposeFlags) void {
     }
 }
 
-pub fn configure(self: *@This()) void {
+pub fn configure(self: *@This()) !void {
     const source_dir = self.source_dir.getPath2(self.b, null);
     const build_dir = self.build_dir.getPath2(self.b, null);
 
@@ -211,24 +212,24 @@ pub fn configure(self: *@This()) void {
         else => unreachable,
     };
 
-    var args = std.ArrayList([]const u8).init(self.b.allocator);
-    args.append("cmake") catch unreachable;
+    var args = std.array_list.Managed([]const u8).init(self.b.allocator);
+    try args.append("cmake");
 
-    args.append("-S") catch unreachable;
-    args.append(source_dir) catch unreachable;
-    args.append("-B") catch unreachable;
-    args.append(build_dir) catch unreachable;
+    try args.append("-S");
+    try args.append(source_dir);
+    try args.append("-B");
+    try args.append(build_dir);
 
     // Needed to generate a trace file which we can parse to find out where artifacts will be located
     const trace_path = self.build_dir.path(self.b, "cmake_trace.txt").getPath2(self.b, null);
-    args.append("--trace") catch unreachable;
-    args.append("--trace-expand") catch unreachable;
-    args.append("--trace-format=json-v1") catch unreachable;
+    try args.append("--trace");
+    try args.append("--trace-expand");
+    try args.append("--trace-format=json-v1");
     const trace_redirect = std.fmt.allocPrint(self.b.allocator, "--trace-redirect={s}", .{trace_path}) catch @panic("OOM");
-    args.append(trace_redirect) catch unreachable;
+    try args.append(trace_redirect);
 
     // Disable some warnings
-    args.append("-DCMAKE_POLICY_WARNING_CMP0156=OFF") catch unreachable;
+    try args.append("-DCMAKE_POLICY_WARNING_CMP0156=OFF");
 
     var it = self.options.iterator();
     while (it.next()) |entry| {
@@ -244,47 +245,55 @@ pub fn configure(self: *@This()) void {
 
         const flag = std.fmt.allocPrint(self.b.allocator, "{s}:{s}={s}", .{ entry.key_ptr.*, valtype, value }) catch @panic("OOM");
 
-        args.append("-D") catch unreachable;
-        args.append(flag) catch unreachable;
+        try args.append("-D");
+        try args.append(flag);
     }
 
     //std.debug.print("{s}\n", .{build_dir});
     //std.debug.print("{s}\n", .{args.items});
     _ = self.b.run(args.items);
 
-    const file = fs.cwd().openFile(trace_path, .{}) catch unreachable;
+    //std.debug.print("{s}\n", .{trace_path});
+
+    const file = try fs.cwd().openFile(trace_path, .{});
     defer file.close();
 
-    var buf_reader = std.io.bufferedReader(file.reader());
-    const reader = buf_reader.reader();
+    var buffer: [1024 * 1024]u8 = undefined;
+    var file_reader = file.reader(&buffer);
+    var reader = &file_reader.interface;
 
-    var line = std.ArrayList(u8).init(self.b.allocator);
+    var line: std.Io.Writer.Allocating = .init(self.b.allocator);
     defer line.deinit();
+    const writer = &line.writer;
 
-    var cmd_ignore_list = std.ArrayList([]const u8).init(self.b.allocator);
+    var cmd_ignore_list: std.array_list.Managed([]const u8) = .init(self.b.allocator);
 
-    const writer = line.writer();
-    outer: while (reader.streamUntilDelimiter(writer, '\n', null)) {
+    outer: while (reader.streamDelimiter(writer, '\n')) |_| {
         // Clear the line so we can reuse it.
         defer line.clearRetainingCapacity();
+        defer reader.toss(1);
 
-        const parsed = std.json.parseFromSlice(
+        const line_buffer = writer.buffer[0..writer.end];
+
+        std.debug.print("{s}\n", .{line_buffer});
+
+        const parsed = try std.json.parseFromSlice(
             Trace,
             self.b.allocator,
-            line.items,
+            line_buffer,
             .{},
-        ) catch unreachable;
+        );
         defer parsed.deinit();
         const trace = parsed.value;
 
         if (trace.cmd) |cmd_string| {
             for (cmd_ignore_list.items) |ignored_cmd| {
-                const lowercase_cmd_string = std.ascii.allocLowerString(self.b.allocator, cmd_string) catch unreachable;
+                const lowercase_cmd_string = try std.ascii.allocLowerString(self.b.allocator, cmd_string);
                 if (std.mem.eql(u8, ignored_cmd, lowercase_cmd_string)) continue :outer;
             }
 
             const cmd = std.meta.stringToEnum(Commands, cmd_string) orelse {
-                std.debug.print("unhandled command: {s}({s})\n", .{ cmd_string, trace.args.? });
+                std.debug.print("unhandled command: {s}({any})\n", .{ cmd_string, trace.args.? });
                 @panic("unhandled command");
             };
             switch (cmd) {
@@ -325,6 +334,7 @@ pub fn configure(self: *@This()) void {
                 .target_sources,
                 .unset,
                 .lang,
+                .execute_process,
                 => {},
 
                 // macros and functions are already evaluated, just ignore any invocation of them
@@ -335,9 +345,10 @@ pub fn configure(self: *@This()) void {
             }
         }
     } else |err| switch (err) {
-        error.EndOfStream => assert(line.items.len == 0),
-        else => unreachable,
+        error.EndOfStream => assert(writer.end == 0),
+        error.ReadFailed => unreachable,
+        error.WriteFailed => unreachable,
     }
 
-    std.debug.print("configured cmake project", .{});
+    std.debug.print("configured cmake project\n", .{});
 }
