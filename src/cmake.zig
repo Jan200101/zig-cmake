@@ -12,7 +12,6 @@ b: *Build,
 target: ?Build.ResolvedTarget,
 optimize: ?builtin.OptimizeMode,
 
-name: []const u8,
 source_dir: Build.LazyPath,
 build_dir: Build.LazyPath,
 
@@ -36,11 +35,10 @@ pub const OptionType = union(OptionTypeTag) {
 };
 
 pub const Options = struct {
-    name: []const u8,
-    path: Build.LazyPath,
-
     target: ?Build.ResolvedTarget = null,
     optimize: ?builtin.OptimizeMode = null,
+
+    path: Build.LazyPath,
 };
 
 pub const Trace = @import("Trace.zig");
@@ -65,6 +63,8 @@ pub const Commands = enum {
     cmake_initialize_per_config_variable,
     cmake_minimum_required,
     cmake_policy,
+    cmake_path,
+    cmake_parse_arguments,
     @"else",
     elseif,
     find_package,
@@ -96,6 +96,17 @@ pub const Commands = enum {
     lang,
     execute_process,
     find_program,
+    configure_file,
+    file,
+    find_file,
+    separate_arguments,
+    @"break",
+    try_compile,
+    include_directories,
+    link_directories,
+    add_definitions,
+    add_executable,
+    @"continue",
 
     // function:
     //_cmake_record_install_prefix,
@@ -147,7 +158,6 @@ pub fn tryinit(b: *Build, options: Options) !*cmake {
         .target = target,
         .optimize = optimize,
 
-        .name = options.name,
         .source_dir = options.path,
         .build_dir = options.path.path(b, build_dir_name),
 
@@ -338,6 +348,8 @@ pub fn configure(self: *@This()) !void {
                 .cmake_initialize_per_config_variable,
                 .cmake_minimum_required,
                 .cmake_policy,
+                .cmake_path,
+                .cmake_parse_arguments,
                 .@"else",
                 .elseif,
                 .find_package_handle_standard_args,
@@ -362,6 +374,16 @@ pub fn configure(self: *@This()) !void {
                 .execute_process,
                 .@"return",
                 .find_program,
+                .configure_file,
+                .file,
+                .find_file,
+                .separate_arguments,
+                .@"break",
+                .try_compile,
+                .include_directories,
+                .link_directories,
+                .add_definitions,
+                .@"continue",
                 => {
                     //log.debug("{f}", .{trace});
                 },
@@ -370,6 +392,60 @@ pub fn configure(self: *@This()) !void {
                 .macro, .function => {
                     const method_name = std.ascii.allocLowerString(self.b.allocator, trace.args.?[0]) catch unreachable;
                     try function_list.append(method_name);
+                },
+
+                .add_executable,
+                => {
+                    //log.debug("{f}", .{trace});
+
+                    const name, const sources = blk: {
+                        var target_name: ?[]const u8 = null;
+                        var sources: ?[]const []const u8 = null;
+
+                        if (trace.args) |args| {
+                            for (args, 0..) |arg, i| {
+                                switch (i) {
+                                    0 => target_name = arg,
+                                    else => {
+                                        sources = args[i..];
+                                        break;
+                                    },
+                                }
+                            }
+
+                            if (target_name) |real_name|
+                                break :blk .{ real_name, sources };
+
+                            unreachable;
+                        }
+
+                        unreachable;
+                    };
+
+                    //log.info("adding library {s}", .{name});
+
+                    const mod = self.b.createModule(.{
+                        .target = self.target,
+                        .optimize = self.optimize,
+                    });
+
+                    const compile_step =
+                        self.b.addExecutable(.{
+                            .name = name,
+                            .root_module = mod,
+                        });
+
+                    compile_step.linkLibC();
+
+                    if (sources) |real_sources| {
+                        for (real_sources) |source| {
+                            // TODO
+                            //log.debug("source {s}", .{source});
+                            _ = source;
+                        }
+                    }
+
+                    try self.targets.put(compile_step.name, compile_step);
                 },
 
                 .add_library => {

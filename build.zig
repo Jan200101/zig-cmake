@@ -10,10 +10,10 @@ pub fn build(b: *Build) void {
     const loggerdb_dep = b.dependency("loggerdb", .{});
 
     var project = cmake.init(b, .{
-        .name = "loggerdb",
-        .path = loggerdb_dep.path(""),
         .target = target,
         .optimize = optimize,
+
+        .path = loggerdb_dep.path(""),
     });
     defer project.deinit();
 
