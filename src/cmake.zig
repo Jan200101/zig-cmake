@@ -1,4 +1,6 @@
 const std = @import("std");
+
+const log = std.log;
 const Build = std.Build;
 const StringHashMap = std.StringHashMap;
 const builtin = std.builtin;
@@ -7,11 +9,14 @@ const assert = std.debug.assert;
 const cmake = @This();
 
 b: *Build,
+target: ?Build.ResolvedTarget,
+optimize: ?builtin.OptimizeMode,
+
 name: []const u8,
 source_dir: Build.LazyPath,
 build_dir: Build.LazyPath,
 
-targets: StringHashMap(std.Build.Module),
+targets: StringHashMap(*std.Build.Step.Compile),
 options: StringHashMap(OptionType),
 
 pub const OptionTypeTag = enum {
@@ -38,43 +43,22 @@ pub const Options = struct {
     optimize: ?builtin.OptimizeMode = null,
 };
 
-pub const Trace = struct {
-    version: ?struct {
-        major: u8,
-        minor: u8,
-    } = null,
-    args: ?[]const []const u8 = null,
-    cmd: ?[]const u8 = null,
-    file: ?[]const u8 = null,
-    frame: ?u32 = null,
-    global_frame: ?u32 = null,
-    line: ?u32 = null,
-    line_end: ?u32 = null,
-    time: ?f32 = null,
+pub const Trace = @import("Trace.zig");
 
-    pub fn format(self: @This(), writer: *std.Io.Writer) !void {
-        if (self.cmd == null)
-            return;
-
-        try writer.writeAll(self.cmd.?);
-        if (self.args) |args| {
-            try writer.writeAll("(");
-            for (args, 0..) |arg, i| {
-                if (i != 0)
-                    try writer.writeAll(", ");
-                try writer.print("\"{f}\"", .{std.zig.fmtString(arg)});
-            }
-            try writer.writeAll(")");
-        } else {
-            try writer.writeAll("()");
-        }
-    }
+pub const Linkage = enum {
+    STATIC,
+    SHARED,
+    MODULE,
+    OBJECT,
+    INTERFACE,
+    UNKNOWN,
 };
 
 pub const Commands = enum {
     add_library,
     add_subdirectory,
     block,
+    endblock,
     check_c_source_compiles,
     check_include_file,
     cmake_check_source_compiles,
@@ -111,6 +95,7 @@ pub const Commands = enum {
     unset,
     lang,
     execute_process,
+    find_program,
 
     // function:
     //_cmake_record_install_prefix,
@@ -126,19 +111,25 @@ pub const Commands = enum {
     //__linux_compiler_gnu,
 };
 
-pub fn create(b: *Build, options: Options) *cmake {
+pub fn init(b: *Build, options: Options) *cmake {
+    return tryinit(b, options) catch unreachable;
+}
+
+pub fn tryinit(b: *Build, options: Options) !*cmake {
     const target = options.target orelse b.standardTargetOptions(.{});
     const optimize = options.optimize orelse b.standardOptimizeOption(.{});
-    const triple = target.result.zigTriple(b.allocator) catch unreachable;
+    const triple = try target.result.zigTriple(b.allocator);
 
     var cmake_options = StringHashMap(OptionType).init(b.allocator);
-    cmake_options.put("CMAKE_C_COMPILER", .{ .STRING = b.graph.zig_exe }) catch unreachable;
-    cmake_options.put("CMAKE_CXX_COMPILER", .{ .STRING = b.graph.zig_exe }) catch unreachable;
+    errdefer cmake_options.deinit();
 
-    const c_compiler_args = std.fmt.allocPrint(b.allocator, "cc -target {s}", .{triple}) catch unreachable;
-    cmake_options.put("CMAKE_C_COMPILER_ARG1", .{ .STRING = c_compiler_args }) catch unreachable;
-    const cxx_compiler_args = std.fmt.allocPrint(b.allocator, "c++ -target {s}", .{triple}) catch unreachable;
-    cmake_options.put("CMAKE_CXX_COMPILER_ARG1", .{ .STRING = cxx_compiler_args }) catch unreachable;
+    try cmake_options.put("CMAKE_C_COMPILER", .{ .STRING = b.graph.zig_exe });
+    const c_compiler_args = try std.fmt.allocPrint(b.allocator, "cc -target {s}", .{triple});
+    try cmake_options.put("CMAKE_C_COMPILER_ARG1", .{ .STRING = c_compiler_args });
+
+    try cmake_options.put("CMAKE_CXX_COMPILER", .{ .STRING = b.graph.zig_exe });
+    const cxx_compiler_args = try std.fmt.allocPrint(b.allocator, "c++ -target {s}", .{triple});
+    try cmake_options.put("CMAKE_CXX_COMPILER_ARG1", .{ .STRING = cxx_compiler_args });
 
     const cmake_build_type = switch (optimize) {
         .Debug => "Debug",
@@ -148,18 +139,28 @@ pub fn create(b: *Build, options: Options) *cmake {
     cmake_options.put("CMAKE_BUILD_TYPE", .{ .STRING = cmake_build_type }) catch unreachable;
 
     const build_dir_name = std.fmt.allocPrint(b.allocator, "build", .{}) catch unreachable;
+    defer b.allocator.free(build_dir_name);
 
     const cmake_target = b.allocator.create(cmake) catch @panic("OOM");
     cmake_target.* = .{
         .b = b,
+        .target = target,
+        .optimize = optimize,
+
         .name = options.name,
         .source_dir = options.path,
         .build_dir = options.path.path(b, build_dir_name),
-        .targets = StringHashMap(std.Build.Module).init(b.allocator),
+
+        .targets = StringHashMap(*std.Build.Step.Compile).init(b.allocator),
         .options = cmake_options,
     };
 
     return cmake_target;
+}
+
+pub fn deinit(self: *@This()) void {
+    self.targets.deinit();
+    self.options.deinit();
 }
 
 pub fn setOption(self: *@This(), k: []const u8, v: OptionType) void {
@@ -170,12 +171,16 @@ pub fn removeOption(self: *@This(), k: []const u8) void {
     _ = self.options.remove(k);
 }
 
-pub const exposeFlags = struct {
+pub fn getTarget(self: *@This(), k: []const u8) ?*std.Build.Step.Compile {
+    return self.targets.get(k);
+}
+
+pub const ExposeOptions = struct {
     advanced: bool = false,
 };
 
 /// expose cmake options directly as string options
-pub fn exposeOptions(self: *@This(), flags: exposeFlags) void {
+pub fn exposeOptions(self: *@This(), flags: ExposeOptions) void {
     const cmake_flags = if (flags.advanced)
         "-LAH"
     else
@@ -230,24 +235,24 @@ pub fn configure(self: *@This()) !void {
         else => unreachable,
     };
 
-    var args = std.array_list.Managed([]const u8).init(self.b.allocator);
-    try args.append("cmake");
+    var cmake_args = std.array_list.Managed([]const u8).init(self.b.allocator);
+    try cmake_args.append("cmake");
 
-    try args.append("-S");
-    try args.append(source_dir);
-    try args.append("-B");
-    try args.append(build_dir);
+    try cmake_args.append("-S");
+    try cmake_args.append(source_dir);
+    try cmake_args.append("-B");
+    try cmake_args.append(build_dir);
 
     // Needed to generate a trace file which we can parse to find out where artifacts will be located
     const trace_path = self.build_dir.path(self.b, "cmake_trace.txt").getPath2(self.b, null);
-    try args.append("--trace");
-    try args.append("--trace-expand");
-    try args.append("--trace-format=json-v1");
+    try cmake_args.append("--trace");
+    try cmake_args.append("--trace-expand");
+    try cmake_args.append("--trace-format=json-v1");
     const trace_redirect = std.fmt.allocPrint(self.b.allocator, "--trace-redirect={s}", .{trace_path}) catch @panic("OOM");
-    try args.append(trace_redirect);
+    try cmake_args.append(trace_redirect);
 
     // Disable some warnings
-    try args.append("-DCMAKE_POLICY_WARNING_CMP0156=OFF");
+    try cmake_args.append("-DCMAKE_POLICY_WARNING_CMP0156=OFF");
 
     var it = self.options.iterator();
     while (it.next()) |entry| {
@@ -263,13 +268,13 @@ pub fn configure(self: *@This()) !void {
 
         const flag = std.fmt.allocPrint(self.b.allocator, "{s}:{s}={s}", .{ entry.key_ptr.*, valtype, value }) catch @panic("OOM");
 
-        try args.append("-D");
-        try args.append(flag);
+        try cmake_args.append("-D");
+        try cmake_args.append(flag);
     }
 
     //std.debug.print("{s}\n", .{build_dir});
-    //std.debug.print("{s}\n", .{args.items});
-    _ = self.b.run(args.items);
+    //std.debug.print("{s}\n", .{cmake_args.items});
+    _ = self.b.run(cmake_args.items);
 
     //std.debug.print("{s}\n", .{trace_path});
 
@@ -284,7 +289,7 @@ pub fn configure(self: *@This()) !void {
     defer line.deinit();
     const writer = &line.writer;
 
-    var cmd_ignore_list: std.array_list.Managed([]const u8) = .init(self.b.allocator);
+    var function_list: std.array_list.Managed([]const u8) = .init(self.b.allocator);
 
     outer: while (reader.streamDelimiter(writer, '\n')) |_| {
         // Clear the line so we can reuse it.
@@ -310,7 +315,7 @@ pub fn configure(self: *@This()) !void {
         }
 
         if (trace.cmd) |cmd_string| {
-            for (cmd_ignore_list.items) |ignored_cmd| {
+            for (function_list.items) |ignored_cmd| {
                 const lowercase_cmd_string = try std.ascii.allocLowerString(self.b.allocator, cmd_string);
                 if (std.mem.eql(u8, ignored_cmd, lowercase_cmd_string)) continue :outer;
             }
@@ -324,6 +329,9 @@ pub fn configure(self: *@This()) !void {
                 // No need to handle this ourselves, just ignore them when they are invoked
                 .add_subdirectory,
                 .block,
+                .endblock,
+                .include,
+                .find_package,
                 .check_c_source_compiles,
                 .check_include_file,
                 .cmake_check_source_compiles,
@@ -332,14 +340,12 @@ pub fn configure(self: *@This()) !void {
                 .cmake_policy,
                 .@"else",
                 .elseif,
-                .find_package,
                 .find_package_handle_standard_args,
                 .find_package_message,
                 .foreach,
                 .get_filename_component,
                 .get_property,
                 .@"if",
-                .include,
                 .include_guard,
                 .list,
                 .mark_as_advanced,
@@ -347,34 +353,194 @@ pub fn configure(self: *@This()) !void {
                 .message,
                 .option,
                 .project,
-                .@"return",
                 .set,
                 .set_property,
                 .string,
-                .target_compile_definitions,
-                .target_include_directories,
                 .target_link_libraries,
-                .target_sources,
                 .unset,
                 .lang,
                 .execute_process,
-                => {},
+                .@"return",
+                .find_program,
+                => {
+                    //log.debug("{f}", .{trace});
+                },
 
                 // macros and functions are already evaluated, just ignore any invocation of them
                 .macro, .function => {
                     const method_name = std.ascii.allocLowerString(self.b.allocator, trace.args.?[0]) catch unreachable;
-                    cmd_ignore_list.append(method_name) catch unreachable;
+                    try function_list.append(method_name);
                 },
 
                 .add_library => {
-                    std.debug.print("{f}\n", .{trace});
+                    //log.debug("{f}", .{trace});
+
+                    const name, const libtype, const sources = blk: {
+                        var target_name: ?[]const u8 = null;
+                        var libtype: Linkage = .STATIC;
+                        var sources: ?[]const []const u8 = null;
+
+                        if (trace.args) |args| {
+                            for (args, 0..) |arg, i| {
+                                switch (i) {
+                                    0 => target_name = arg,
+                                    1 => libtype = std.meta.stringToEnum(Linkage, arg) orelse unreachable,
+                                    else => {
+                                        sources = args[i..];
+                                        break;
+                                    },
+                                }
+                            }
+
+                            if (target_name) |real_name|
+                                break :blk .{ real_name, libtype, sources };
+
+                            unreachable;
+                        }
+
+                        unreachable;
+                    };
+
+                    //log.info("adding library {s}", .{name});
+
+                    const mod = self.b.createModule(.{
+                        .target = self.target,
+                        .optimize = self.optimize,
+                    });
+
+                    const compile_step = if (libtype == .OBJECT)
+                        self.b.addObject(.{
+                            .name = name,
+                            .root_module = mod,
+                        })
+                    else
+                        self.b.addLibrary(.{
+                            .name = name,
+                            .linkage = switch (libtype) {
+                                .STATIC,
+                                .MODULE,
+                                .INTERFACE,
+                                => .static,
+
+                                .SHARED,
+                                => .dynamic,
+
+                                else => unreachable,
+                            },
+                            .root_module = mod,
+                        });
+
+                    compile_step.linkLibC();
+
+                    if (sources) |real_sources| {
+                        for (real_sources) |source| {
+                            // TODO
+                            //log.debug("source {s}", .{source});
+                            _ = source;
+                        }
+                    }
+
+                    try self.targets.put(compile_step.name, compile_step);
+                },
+
+                .target_sources => {
+                    //log.debug("{f}", .{trace});
+
+                    var compile_step: ?*std.Build.Step.Compile = null;
+                    var target_type: ?Linkage = null;
+
+                    if (trace.args) |args| {
+                        for (args, 0..) |arg, i| {
+                            if (i == 0) {
+                                //log.debug("looking for {s}", .{arg});
+                                compile_step = self.getTarget(arg);
+                                continue;
+                            }
+
+                            target_type = std.meta.stringToEnum(Linkage, arg) orelse {
+                                if (compile_step) |real_step| {
+                                    const trace_cwd: Build.LazyPath = .{
+                                        .cwd_relative = fs.path.dirname(trace.file orelse unreachable) orelse unreachable,
+                                    };
+
+                                    //log.debug("adding {s} to {s}", .{ arg, real_step.name });
+
+                                    real_step.addCSourceFile(.{
+                                        .file = try trace_cwd.join(self.b.allocator, arg),
+                                        .language = null,
+                                    });
+                                } else unreachable;
+                                continue;
+                            };
+                        }
+                    } else unreachable;
+                },
+
+                .target_compile_definitions => {
+                    //log.debug("{f}", .{trace});
+
+                    var compile_step: ?*std.Build.Step.Compile = null;
+                    var target_type: ?Linkage = null;
+
+                    if (trace.args) |args| {
+                        for (args, 0..) |arg, i| {
+                            if (i == 0) {
+                                //log.debug("looking for {s}", .{arg});
+                                compile_step = self.getTarget(arg);
+                                continue;
+                            }
+
+                            target_type = std.meta.stringToEnum(Linkage, arg) orelse {
+                                if (compile_step) |real_step| {
+                                    const key_end = std.mem.indexOf(u8, arg, "=") orelse unreachable;
+                                    const key = arg[0..key_end];
+                                    const value = arg[key_end + 1 ..];
+
+                                    //log.debug("setting {s}={s}", .{ key, value });
+
+                                    real_step.root_module.addCMacro(key, value);
+                                } else unreachable;
+                                continue;
+                            };
+                        }
+                    } else unreachable;
+                },
+
+                .target_include_directories => {
+                    //log.debug("{f}", .{trace});
+
+                    var compile_step: ?*std.Build.Step.Compile = null;
+                    var target_type: ?Linkage = null;
+
+                    if (trace.args) |args| {
+                        for (args, 0..) |arg, i| {
+                            if (i == 0) {
+                                //log.debug("looking for {s}", .{arg});
+                                compile_step = self.getTarget(arg);
+                                continue;
+                            }
+
+                            target_type = std.meta.stringToEnum(Linkage, arg) orelse {
+                                if (compile_step) |real_step| {
+                                    const trace_cwd: Build.LazyPath = .{
+                                        .cwd_relative = fs.path.dirname(trace.file orelse unreachable) orelse unreachable,
+                                    };
+
+                                    //log.debug("adding {s} to {s}", .{ arg, real_step.name });
+
+                                    real_step.addIncludePath(try trace_cwd.join(self.b.allocator, arg));
+                                } else unreachable;
+                                continue;
+                            };
+                        }
+                    } else unreachable;
                 },
             }
 
             continue;
         }
 
-        std.debug.print("unhandled trace: {s}\n", .{line_buffer});
+        log.debug("unhandled trace: {s}", .{line_buffer});
         unreachable;
     } else |err| switch (err) {
         error.EndOfStream => assert(writer.end == 0),
@@ -382,5 +548,5 @@ pub fn configure(self: *@This()) !void {
         error.WriteFailed => unreachable,
     }
 
-    std.debug.print("configured cmake project\n", .{});
+    log.info("configured cmake project", .{});
 }
