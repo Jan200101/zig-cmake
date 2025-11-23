@@ -263,6 +263,7 @@ pub fn configure(self: *@This()) !void {
 
     // Disable some warnings
     try cmake_args.append("-DCMAKE_POLICY_WARNING_CMP0156=OFF");
+    try cmake_args.append("-DCMAKE_POLICY_WARNING_CMP0126=OFF");
 
     var it = self.options.iterator();
     while (it.next()) |entry| {
