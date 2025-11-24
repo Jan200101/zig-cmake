@@ -3,6 +3,10 @@
         .url = "https://github.com/Jan200101/loggerDB/archive/d073a3b9b1d4d070b0f58e962a90396d67003930.tar.gz",
         .hash = "1220fe6f9ae3277658502f3a0e8bf4ab52826071a953a49399ca486d06a0af63dae4",
     },
+    .SDL = .{
+            .url = "git+https://github.com/libsdl-org/SDL.git#ff44bad9bdb69f14387157ad82a8c41425f174b9",
+            .hash = "N-V-__8AAAe38AIZAXndOU0zSPEGY0q1f9MvoloC3TwysxKG",
+        },
 }, .paths = .{
     "build.zig",
     "build.zig.zon",

@@ -52,6 +52,19 @@ pub const Linkage = enum {
     UNKNOWN,
 };
 
+const MessageMode = enum {
+    FATAL_ERROR,
+    SEND_ERROR,
+    WARNING,
+    AUTHOR_WARNING,
+    DEPRECATION,
+    NOTICE,
+    STATUS,
+    VERBOSE,
+    DEBUG,
+    TRACE,
+};
+
 pub const Commands = enum {
     add_library,
     add_subdirectory,
@@ -107,19 +120,23 @@ pub const Commands = enum {
     add_definitions,
     add_executable,
     @"continue",
-
-    // function:
-    //_cmake_record_install_prefix,
-
-    // macros
-    //_cmake_common_language_platform_flags,
-    //_threads_check_flag_pthread,
-    //_threads_check_lib,
-    //_threads_check_libc,
-    //__compiler_check_default_language_standard,
-    //__compiler_clang,
-    //__compiler_gnu,
-    //__linux_compiler_gnu,
+    add_compile_options,
+    target_compile_options,
+    target_compile_features,
+    target_link_options,
+    source_group,
+    find_path,
+    find_library,
+    set_target_properties,
+    add_custom_command,
+    get_target_property,
+    @"while",
+    set_source_files_properties,
+    target_precompile_headers,
+    @"export",
+    install,
+    get_cmake_property,
+    add_custom_target,
 };
 
 pub fn init(b: *Build, options: Options) *cmake {
@@ -182,6 +199,13 @@ pub fn removeOption(self: *@This(), k: []const u8) void {
 }
 
 pub fn getTarget(self: *@This(), k: []const u8) ?*std.Build.Step.Compile {
+    log.debug("c {}", .{self.targets.count()});
+
+    var iter = self.targets.keyIterator();
+    while (iter.next()) |v| {
+        log.debug("{s}", .{v.*});
+    }
+
     return self.targets.get(k);
 }
 
@@ -236,7 +260,11 @@ pub fn exposeOptions(self: *@This(), flags: ExposeOptions) void {
     }
 }
 
-pub fn configure(self: *@This()) !void {
+pub const ConfigureOptions = struct {
+    debug: bool = false,
+};
+
+pub fn configure(self: *@This(), options: ConfigureOptions) !void {
     const source_dir = self.source_dir.getPath2(self.b, null);
     const build_dir = self.build_dir.getPath2(self.b, null);
 
@@ -285,7 +313,7 @@ pub fn configure(self: *@This()) !void {
 
     //std.debug.print("{s}\n", .{build_dir});
     //std.debug.print("{s}\n", .{cmake_args.items});
-    _ = self.b.run(cmake_args.items);
+    //_ = self.b.run(cmake_args.items);
 
     //std.debug.print("{s}\n", .{trace_path});
 
@@ -326,69 +354,22 @@ pub fn configure(self: *@This()) !void {
         }
 
         if (trace.cmd) |cmd_string| {
+            const lowercase_cmd_string = try std.ascii.allocLowerString(self.b.allocator, cmd_string);
+            defer self.b.allocator.free(lowercase_cmd_string);
+
             for (function_list.items) |ignored_cmd| {
-                const lowercase_cmd_string = try std.ascii.allocLowerString(self.b.allocator, cmd_string);
                 if (std.mem.eql(u8, ignored_cmd, lowercase_cmd_string)) continue :outer;
             }
 
-            const cmd = std.meta.stringToEnum(Commands, cmd_string) orelse {
+            if (options.debug)
+                log.debug("{f}", .{trace});
+
+            const cmd = std.meta.stringToEnum(Commands, lowercase_cmd_string) orelse {
                 std.debug.print("unhandled command: {f}\n", .{trace});
                 @panic("unhandled command");
             };
 
             switch (cmd) {
-                // No need to handle this ourselves, just ignore them when they are invoked
-                .add_subdirectory,
-                .block,
-                .endblock,
-                .include,
-                .find_package,
-                .check_c_source_compiles,
-                .check_include_file,
-                .cmake_check_source_compiles,
-                .cmake_initialize_per_config_variable,
-                .cmake_minimum_required,
-                .cmake_policy,
-                .cmake_path,
-                .cmake_parse_arguments,
-                .@"else",
-                .elseif,
-                .find_package_handle_standard_args,
-                .find_package_message,
-                .foreach,
-                .get_filename_component,
-                .get_property,
-                .@"if",
-                .include_guard,
-                .list,
-                .mark_as_advanced,
-                .math,
-                .message,
-                .option,
-                .project,
-                .set,
-                .set_property,
-                .string,
-                .target_link_libraries,
-                .unset,
-                .lang,
-                .execute_process,
-                .@"return",
-                .find_program,
-                .configure_file,
-                .file,
-                .find_file,
-                .separate_arguments,
-                .@"break",
-                .try_compile,
-                .include_directories,
-                .link_directories,
-                .add_definitions,
-                .@"continue",
-                => {
-                    //log.debug("{f}", .{trace});
-                },
-
                 // macros and functions are already evaluated, just ignore any invocation of them
                 .macro, .function => {
                     const method_name = std.ascii.allocLowerString(self.b.allocator, trace.args.?[0]) catch unreachable;
@@ -459,14 +440,15 @@ pub fn configure(self: *@This()) !void {
 
                         if (trace.args) |args| {
                             for (args, 0..) |arg, i| {
-                                switch (i) {
-                                    0 => target_name = arg,
-                                    1 => libtype = std.meta.stringToEnum(Linkage, arg) orelse unreachable,
-                                    else => {
-                                        sources = args[i..];
-                                        break;
-                                    },
+                                if (i == 0) {
+                                    target_name = arg;
+                                    continue;
                                 }
+
+                                libtype = std.meta.stringToEnum(Linkage, arg) orelse {
+                                    sources = args[i..];
+                                    break;
+                                };
                             }
 
                             if (target_name) |real_name|
@@ -497,12 +479,14 @@ pub fn configure(self: *@This()) !void {
                                 .STATIC,
                                 .MODULE,
                                 .INTERFACE,
+                                .UNKNOWN,
                                 => .static,
 
                                 .SHARED,
                                 => .dynamic,
 
-                                else => unreachable,
+                                // handled differently
+                                .OBJECT => unreachable,
                             },
                             .root_module = mod,
                         });
@@ -569,9 +553,11 @@ pub fn configure(self: *@This()) !void {
 
                             target_type = std.meta.stringToEnum(Linkage, arg) orelse {
                                 if (compile_step) |real_step| {
-                                    const key_end = std.mem.indexOf(u8, arg, "=") orelse unreachable;
-                                    const key = arg[0..key_end];
-                                    const value = arg[key_end + 1 ..];
+                                    const key, const value = blk: {
+                                        const key_end = std.mem.indexOf(u8, arg, "=") orelse break :blk .{ arg, "" };
+
+                                        break :blk .{ arg[0..key_end], arg[key_end + 1 ..] };
+                                    };
 
                                     //log.debug("setting {s}={s}", .{ key, value });
 
@@ -612,6 +598,46 @@ pub fn configure(self: *@This()) !void {
                         }
                     } else unreachable;
                 },
+
+                .message => {
+                    if (trace.args) |args| {
+                        const mode, const msgs = blk: {
+                            const m = std.meta.stringToEnum(MessageMode, args[0]);
+                            if (m) |real_mode|
+                                break :blk .{ real_mode, args[1..] }
+                            else
+                                break :blk .{ .NOTICE, args };
+                        };
+
+                        for (msgs) |msg| {
+                            switch (mode) {
+                                .FATAL_ERROR,
+                                .SEND_ERROR,
+                                => log.err("{s}", .{msg}),
+
+                                .WARNING,
+                                .AUTHOR_WARNING,
+                                .DEPRECATION,
+                                => log.warn("{s}", .{msg}),
+
+                                .NOTICE,
+                                .STATUS,
+                                .VERBOSE,
+                                => log.info("{s}", .{msg}),
+
+                                .DEBUG,
+                                => if (options.debug)
+                                    log.debug("{s}", .{msg}),
+
+                                .TRACE,
+                                => log.debug("{s}", .{msg}),
+                            }
+                        }
+                    }
+                },
+
+                // many commands are handled by cmake and not by us
+                else => {},
             }
 
             continue;

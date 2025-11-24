@@ -7,7 +7,12 @@ pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    loggerdb_build(b, .{
+    // loggerdb_build(b, .{
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+
+    sdl_build(b, .{
         .target = target,
         .optimize = optimize,
     });
@@ -30,7 +35,7 @@ fn loggerdb_build(b: *Build, options: anytype) void {
     project.setOption("CMAKE_INSTALL_PREFIX", .{ .STRING = "/usr" });
     project.exposeOptions(.{});
 
-    project.configure() catch unreachable;
+    project.configure(.{}) catch unreachable;
 
     const loggerdb_target = project.getTarget("loggerDB") orelse unreachable;
 
@@ -63,6 +68,49 @@ fn loggerdb_build(b: *Build, options: anytype) void {
         }),
     });
     exe.linkLibrary(loggerdb_target);
+    b.installArtifact(exe);
+
+    const run_step = b.step("run", "run test program invoking imported cmake project");
+    const run_cmd = b.addRunArtifact(exe);
+    run_step.dependOn(&run_cmd.step);
+}
+
+fn sdl_build(b: *Build, options: anytype) void {
+    const target = options.target;
+    const optimize = options.optimize;
+
+    const SDL_dep = b.dependency("SDL", .{});
+
+    var project = cmake.init(b, .{
+        .target = target,
+        .optimize = optimize,
+
+        .path = SDL_dep.path(""),
+    });
+    defer project.deinit();
+
+    project.setOption("CMAKE_INSTALL_PREFIX", .{ .STRING = "/usr" });
+    project.setOption("SDL-STATIC", .{ .BOOL = true });
+    //project.exposeOptions(.{});
+
+    project.configure(.{
+        .debug = false,
+    }) catch unreachable;
+
+    const sdl_target = project.getTarget("SDL3-static") orelse
+        project.getTarget("SDL3-shared") orelse
+        unreachable;
+
+    const exe = b.addExecutable(.{
+        .name = "main",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/sdl.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{},
+        }),
+    });
+    exe.linkLibrary(sdl_target);
     b.installArtifact(exe);
 
     const run_step = b.step("run", "run test program invoking imported cmake project");
