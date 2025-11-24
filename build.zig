@@ -7,6 +7,16 @@ pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    loggerdb_build(b, .{
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+fn loggerdb_build(b: *Build, options: anytype) void {
+    const target = options.target;
+    const optimize = options.optimize;
+
     const loggerdb_dep = b.dependency("loggerdb", .{});
 
     var project = cmake.init(b, .{
