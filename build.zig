@@ -7,15 +7,15 @@ pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // loggerdb_build(b, .{
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
-
-    sdl_build(b, .{
+    loggerdb_build(b, .{
         .target = target,
         .optimize = optimize,
     });
+
+    // sdl_build(b, .{
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
 }
 
 fn loggerdb_build(b: *Build, options: anytype) void {
@@ -59,7 +59,7 @@ fn loggerdb_build(b: *Build, options: anytype) void {
     const exe = b.addExecutable(.{
         .name = "main",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/ldb.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{

@@ -199,12 +199,12 @@ pub fn removeOption(self: *@This(), k: []const u8) void {
 }
 
 pub fn getTarget(self: *@This(), k: []const u8) ?*std.Build.Step.Compile {
-    log.debug("c {}", .{self.targets.count()});
+    // log.debug("c {}", .{self.targets.count()});
 
-    var iter = self.targets.keyIterator();
-    while (iter.next()) |v| {
-        log.debug("{s}", .{v.*});
-    }
+    // var iter = self.targets.keyIterator();
+    // while (iter.next()) |v| {
+    //     log.debug("{s}", .{v.*});
+    // }
 
     return self.targets.get(k);
 }
@@ -305,7 +305,7 @@ pub fn configure(self: *@This(), options: ConfigureOptions) !void {
             else => "STRING",
         };
 
-        const flag = std.fmt.allocPrint(self.b.allocator, "{s}:{s}={s}", .{ entry.key_ptr.*, valtype, value }) catch @panic("OOM");
+        const flag = std.fmt.allocPrint(self.b.allocator, "{s}:{s}=\"{s}\"", .{ entry.key_ptr.*, valtype, value }) catch @panic("OOM");
 
         try cmake_args.append("-D");
         try cmake_args.append(flag);
@@ -349,7 +349,7 @@ pub fn configure(self: *@This(), options: ConfigureOptions) !void {
         const trace = parsed.value;
 
         if (trace.version) |version| {
-            std.debug.print("trace version: {}.{}\n", .{ version.major, version.minor });
+            log.debug("trace version: {}.{}", .{ version.major, version.minor });
             continue;
         }
 
@@ -623,7 +623,7 @@ pub fn configure(self: *@This(), options: ConfigureOptions) !void {
                                 .NOTICE,
                                 .STATUS,
                                 .VERBOSE,
-                                => log.info("{s}", .{msg}),
+                                => {}, //log.info("{s}", .{msg}),
 
                                 .DEBUG,
                                 => if (options.debug)
